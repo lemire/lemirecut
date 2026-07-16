@@ -15,6 +15,11 @@ file, and `ffmpeg` (libass) for the render.
 
 ---
 
+
+## Example
+
+[![Using AI to build your own software](https://img.youtube.com/vi/Falc7QnHy7k/maxresdefault.jpg)](https://www.youtube.com/watch?v=Falc7QnHy7k)
+
 ## Requirements
 
 Everything runs through [**uv**](https://docs.astral.sh/uv/) — you don't create
