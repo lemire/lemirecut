@@ -4,6 +4,7 @@
 # dependencies = [
 #   "whisper-timestamped",
 #   "pysubs2",
+#   "auditok",
 # ]
 # ///
 """
@@ -25,6 +26,7 @@ Then review/edit the .ass in any editor and burn it with burn_subs.py.
 
 import argparse
 import os
+import re
 import sys
 
 import pysubs2
@@ -138,7 +140,11 @@ def main():
                    help="whisper model: tiny|base|small|medium|large-v3 (default: medium)")
     p.add_argument("--lang", default=None, help="language code e.g. fr, en (default: auto)")
     p.add_argument("--device", default="cpu", help="cpu | cuda | mps (default: cpu)")
-    p.add_argument("--vad", action="store_true", help="trim hallucinations in silence")
+    p.add_argument("--vad", nargs="?", const="auditok", default=False,
+                   choices=["auditok", "silero"],
+                   help="segment on detected speech: fixes smeared timings "
+                        "around long pauses and dropped trailing speech "
+                        "(default engine: auditok; silero needs torch.hub)")
     p.add_argument("--preset", default="yellow", choices=list(PRESETS),
                    help="highlight color (default: yellow)")
     p.add_argument("--font", default="Helvetica Neue", help="font name")
@@ -164,7 +170,19 @@ def main():
                                 beam_size=5, best_of=5, verbose=False)
     print(f"      language: {result.get('language', args.lang)}", flush=True)
 
-    words = [w for seg in result["segments"] for w in seg.get("words", [])]
+    # Whisper hallucinates broadcast boilerplate in trailing silence/noise
+    # ("Sous-titrage ST' 501", "subtitles by Amara.org", ...). Drop those
+    # segments — they were never spoken.
+    HALLUCINATIONS = re.compile(
+        r"(?i)sous-?titr|amara\.org|subtitles? by|closed captions?|"
+        r"merci d'avoir regard|thanks for watching")
+    segments = [s for s in result["segments"]
+                if not HALLUCINATIONS.search(s.get("text", ""))]
+    if len(segments) < len(result["segments"]):
+        print(f"      dropped {len(result['segments']) - len(segments)} "
+              "hallucinated segment(s)", flush=True)
+
+    words = [w for seg in segments for w in seg.get("words", [])]
     if not words:
         sys.exit("error: no words with timestamps were produced.")
 

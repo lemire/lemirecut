@@ -8,9 +8,9 @@ word-level timing, [`pysubs2`](https://pysubs2.readthedocs.io) for the `.ass`
 file, and `ffmpeg` (libass) for the render.
 
 ```
- video ──▶ generate_subs.py ──▶ subtitles.ass ──▶ burn_subs.py ──▶ subbed.mp4
-            (transcribe +          (review /         (render with
-             word timing)           edit here)         libass)
+ record.py ──▶ video ──▶ generate_subs.py ──▶ subtitles.ass ──▶ burn_subs.py ──▶ subbed.mp4
+ (optional:               (transcribe +          (review /         (render with
+  screen+cam)              word timing)           edit here)         libass)
 ```
 
 ---
@@ -46,6 +46,60 @@ forwarded to step 1, e.g. `./karaoke.sh IMG_20612.mov --model large-v3 --preset 
 
 Prefer to run the steps yourself (to review/edit the `.ass` in between)? Read on.
 
+---
+
+## Recording a screencast — `record.py`
+
+Don't have a video yet? `record.py` records one: a chosen window with
+microphone audio, your webcam as a rounded picture-in-picture, and a
+Screen-Studio-style 2× zoom that follows the mouse.
+
+```bash
+uv run record.py                     # pick a window from the menu
+uv run record.py safari              # only list windows matching "safari"
+uv run record.py 1920x1080           # resize the window to 1920×1080 first
+uv run record.py --no-zoom           # keep a static framing
+```
+
+Stop with **Ctrl-C** — the recording is then composited and saved as
+`window_recording.mp4`, ready for `./karaoke.sh window_recording.mp4`.
+
+What happens on a run:
+
+1. A numbered menu lists your windows — including those on other Spaces
+   (marked `[other space]`). With a single match it starts right away.
+2. The chosen window is brought to the front and resized to a clean recording
+   size (default **1280×720** points → 2560×1440 pixels on Retina; override
+   with a `WxH` argument). Full-screen windows can't be resized.
+3. Screen+mic and webcam are captured by **two separate ffmpeg processes**
+   (two avfoundation inputs in one process starve each other to ~3 fps),
+   then composited when you stop: webcam at ¼ of the window width,
+   bottom-right, rounded corners, lip-sync aligned via the capture clock.
+4. While the mouse moves, the view eases into a **2× zoom centered on the
+   cursor** and eases back out after ~1.2 s of stillness (`--no-zoom` to
+   disable; tunables are constants at the top of the script).
+
+| Argument | Effect |
+|----------|--------|
+| `<text>` | filter the window list (app name or title substring) |
+| `<W>x<H>` | resize the window to W×H points before recording (default `1280x720`) |
+| `--no-zoom` | disable the mouse-following zoom |
+
+**Permissions** (System Settings → Privacy & Security, all for your terminal
+app): **Screen Recording** (capture), **Microphone** (audio), **Camera**
+(webcam PiP — without it you get a screen-only recording), **Accessibility** +
+**Automation → System Events** (the automatic window resize).
+
+**Notes**
+
+- Keep the window visible while recording: the capture crops the *screen*, so
+  covering or moving the window records whatever replaces it.
+- If the webcam fails to start, the recording continues screen-only and the
+  reason lands in `.cam_tmp.log`.
+- The device names ("Capture screen 0", "Micro MacBook Pro", camera index
+  `0`) are for this machine — list yours with
+  `ffmpeg -f avfoundation -list_devices true -i ""`.
+
 ## Usage
 
 ### Step 1 — Generate the subtitles
@@ -65,8 +119,10 @@ uv run burn_subs.py IMG_20612.mov IMG_20612.ass
 ```
 
 Produces `IMG_20612_subbed.mp4` (H.264, web-ready `+faststart`). By default the
-output is **trimmed to the spoken range** — it starts at the first word and ends
-at the last word. Pass `--no-trim` to keep the full video.
+output is **trimmed to the spoken range** — it starts at the first word and
+ends at the next real silence after the last word (so untranscribed trailing
+speech isn't chopped mid-sound). Pass `--exact-end` to cut exactly at the last
+word, or `--no-trim` to keep the full video.
 
 ---
 
@@ -96,7 +152,7 @@ first  for  you  know  for  war  we  wanted
 | `--preset` | `yellow` | highlight color: `yellow · cyan · green · pink · orange` |
 | `--font` | `Helvetica Neue` | any installed font |
 | `--fontsize` | `64` | at 1080p |
-| `--vad` | off | trims hallucinated text during silence |
+| `--vad` | off | segment on detected speech (`--vad` = auditok, `--vad silero`); known hallucinations ("Sous-titrage…", "subtitles by…") are always dropped |
 | `--max-chars` | `38` | line length before wrapping |
 | `--max-words` | `9` | words per line cap |
 | `--max-gap` | `0.7` | pause (seconds) that forces a new line |
@@ -105,7 +161,8 @@ first  for  you  know  for  war  we  wanted
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--no-trim` | off | keep the full video (default trims to first…last word) |
+| `--no-trim` | off | keep the full video (default trims to the spoken range) |
+| `--exact-end` | off | cut at the last word instead of extending to the next silence |
 | `--pad` | `0.1` | seconds of lead/tail around the speech so words aren't clipped (`0` = exact cut) |
 | `--crf` | `18` | x264 quality — lower is better/larger |
 | `--preset` | `medium` | x264 speed preset |
@@ -127,6 +184,7 @@ first  for  you  know  for  war  we  wanted
 
 | File | |
 |------|--|
+| `record.py` | record a window: mic + webcam PiP + mouse-following zoom |
 | `karaoke.sh` | one-command wrapper — runs both steps |
 | `generate_subs.py` | Step 1 — transcribe → styled `.ass` |
 | `burn_subs.py` | Step 2 — burn `.ass` → mp4 |

@@ -22,6 +22,7 @@ you see matches the .ass file exactly.
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,35 @@ def ass_spoken_range(path):
     return min(starts), max(ends)
 
 
+def end_of_sound(ffmpeg, video, noise="-35dB", min_dur=0.5, tail_tolerance=1.0):
+    """Earliest silence_start after which the audio holds less than
+    `tail_tolerance` seconds of total sound through the end of the file.
+    Skips over mid-speech pauses but ignores stray end-of-take blips (the
+    Ctrl-C keystroke, a chair creak). None if the sound runs to the end.
+    """
+    r = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", video,
+         "-af", f"silencedetect=noise={noise}:d={min_dur}", "-f", "null", "-"],
+        capture_output=True, text=True)
+    starts = [float(m.group(1))
+              for m in re.finditer(r"silence_start: ([-\d.]+)", r.stderr)]
+    ends = [float(m.group(1))
+            for m in re.finditer(r"silence_end: ([-\d.]+)", r.stderr)]
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr)
+    if not starts or not m:
+        return None
+    duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    if len(ends) < len(starts):
+        ends.append(duration)  # final silence runs to EOF
+    best, sound_after, next_start = None, 0.0, duration
+    for s, e in zip(reversed(starts), reversed(ends)):
+        sound_after += max(0.0, next_start - e)
+        if sound_after > tail_tolerance:
+            break
+        best, next_start = s, s
+    return best
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -104,6 +134,9 @@ def main():
                    help="path to a libass-enabled ffmpeg (auto-detects ffmpeg-full)")
     p.add_argument("--no-trim", action="store_true",
                    help="keep the full video (default: trim to first..last word)")
+    p.add_argument("--exact-end", action="store_true",
+                   help="cut exactly at the last word instead of extending to "
+                        "the next silence in the audio")
     p.add_argument("--pad", type=float, default=0.1,
                    help="seconds of lead/tail around the speech so words aren't "
                         "clipped (default: 0.1; use 0 for an exact cut)")
@@ -133,14 +166,30 @@ def main():
         else:
             start = max(0.0, rng[0] - args.pad)
             end = rng[1] + args.pad
-            dur = end - start
+            # Whisper's last-word timestamp often lands well before the audio
+            # actually goes quiet (untranscribed speech, trailing sounds), and
+            # cutting there chops the sound off. Extend the end to the next
+            # real silence in the audio.
+            if not args.exact_end:
+                eos = end_of_sound(ffmpeg, args.video)
+                if eos is None:
+                    print("audio never goes quiet — keeping the tail",
+                          flush=True)
+                    end = None
+                elif eos > end:
+                    print(f"extending end past the last word to the end of "
+                          f"sound at {eos:.2f}s", flush=True)
+                    end = eos + args.pad
             # Output-side seek: subs keep their absolute times and render
             # correctly, then the window is muxed from 0. Audio is re-encoded
             # because stream-copy can't cut precisely.
-            trim_args = ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}"]
+            trim_args = ["-ss", f"{start:.3f}"]
+            if end is not None:
+                trim_args += ["-t", f"{end - start:.3f}"]
             audio_args = ["-c:a", "aac", "-b:a", "192k"]
-            print(f"trimming to spoken range: {start:.2f}s .. {end:.2f}s "
-                  f"({dur:.2f}s, pad {args.pad}s)", flush=True)
+            shown = f"{end:.2f}s" if end is not None else "end of file"
+            print(f"trimming to spoken range: {start:.2f}s .. {shown} "
+                  f"(pad {args.pad}s)", flush=True)
 
     cmd = [
         ffmpeg, "-y" if args.yes else "-n",
