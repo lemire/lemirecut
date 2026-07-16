@@ -33,6 +33,19 @@ header inside each script and sets up an isolated, cached environment on Python
 
 ---
 
+## Quick start
+
+One command — video in, subtitled video out:
+
+```bash
+./karaoke.sh IMG_20612.mov
+```
+
+That runs both steps below and writes `IMG_20612_subbed.mp4`. Extra flags are
+forwarded to step 1, e.g. `./karaoke.sh IMG_20612.mov --model large-v3 --preset cyan`.
+
+Prefer to run the steps yourself (to review/edit the `.ass` in between)? Read on.
+
 ## Usage
 
 ### Step 1 — Generate the subtitles
@@ -114,6 +127,7 @@ first  for  you  know  for  war  we  wanted
 
 | File | |
 |------|--|
+| `karaoke.sh` | one-command wrapper — runs both steps |
 | `generate_subs.py` | Step 1 — transcribe → styled `.ass` |
 | `burn_subs.py` | Step 2 — burn `.ass` → mp4 |
 | `README.md` | this file |
