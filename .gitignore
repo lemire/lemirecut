@@ -1,0 +1,13 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Large media (inputs & rendered outputs) — regenerable, not for git
+*.mov
+*.mp4
+*.mkv
+*.wav
+
+# Generated subtitles (regenerable from the video)
+*.ass
