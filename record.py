@@ -2,6 +2,7 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #     "pyobjc-framework-Quartz",
+#     "pyobjc-framework-AVFoundation",
 #     "ffmpeg-python",
 # ]
 # ///
@@ -27,6 +28,8 @@ from Quartz import (
     CGEventGetLocation,
 )
 from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
+from Foundation import NSURL, NSRunLoop, NSDate
+import AVFoundation
 import ffmpeg
 
 OUTPUT = "window_recording.mp4"
@@ -236,7 +239,7 @@ x, y, w, h = x * scale, y * scale, (w * scale) & ~1, (h * scale) & ~1
 # .mkv: stays readable even if a capture process dies without finalizing.
 screen_file, cam_file = ".screen_tmp.mkv", ".cam_tmp.mkv"
 screen_log, cam_log = ".screen_tmp.log", ".cam_tmp.log"
-mic_file, mic_log = ".mic_tmp.mkv", ".mic_tmp.log"
+mic_file = ".mic_tmp.wav"
 
 screen_in = ffmpeg.input(
     "Capture screen 0",  # video only — the mic is its own process, see below
@@ -250,18 +253,32 @@ screen_out = ffmpeg.output(
     screen_file, vcodec="h264_videotoolbox", r=FPS, fps_mode="cfr",
 ).global_args("-nostdin")
 
-# The microphone gets its OWN process too. Sharing one avfoundation input
-# with the screen means one packet queue: whenever the h264 encoder falls
-# behind the raw 3456x2234 feed (it runs at ~0.98x, so it always does
-# eventually) the audio packets behind it are dropped, and the gaps are
-# what you hear as breakup. Alone, mic capture holds 1.00x indefinitely.
-# flac: lossless, so the single aac encode at composite time is the only
-# lossy step (the old path encoded aac twice, the first at ~69 kb/s).
-mic_in = ffmpeg.input(
-    ":Micro MacBook Pro",  # leading colon = no video device
-    f="avfoundation", thread_queue_size=1024,
-)
-mic_out = ffmpeg.output(mic_in, mic_file, acodec="flac").global_args("-nostdin")
+# The microphone is NOT captured with ffmpeg. ffmpeg's avfoundation input
+# holds a single pending audio buffer and discards any that arrives before
+# the reader drains it, so it drops ~9% of buffers — measured as one lost
+# 12ms buffer roughly 5x a second, whatever thread_queue_size is set to
+# (the drop happens upstream of that queue). Those holes are the breakup.
+# AVAudioRecorder buffers properly and measures 99.7% delivery.
+def start_mic(path):
+    """Record the default input to 16-bit PCM. Returns (recorder, t0) with
+    t0 on time.monotonic(), the same clock avfoundation logs as 'start:'."""
+    settings = {
+        AVFoundation.AVFormatIDKey: 1819304813,  # kAudioFormatLinearPCM
+        AVFoundation.AVSampleRateKey: 44100.0,
+        AVFoundation.AVNumberOfChannelsKey: 1,
+        AVFoundation.AVLinearPCMBitDepthKey: 16,
+        AVFoundation.AVLinearPCMIsFloatKey: False,
+        AVFoundation.AVLinearPCMIsBigEndianKey: False,
+    }
+    rec, err = AVFoundation.AVAudioRecorder.alloc().initWithURL_settings_error_(
+        NSURL.fileURLWithPath_(os.path.abspath(path)), settings, None)
+    if rec is None:
+        print(f"Microphone capture failed to start ({err}) — recording without sound.")
+        return None, None
+    rec.prepareToRecord()
+    t0 = time.monotonic()
+    rec.record()
+    return rec, t0
 
 cam_in = ffmpeg.input(
     "0",  # [0] Caméra MacBook Pro (matching by accented name fails)
@@ -298,16 +315,16 @@ def start_capture(stream, log_path, tries=1):
 cam_proc = start_capture(cam_out, cam_log, tries=3)
 if cam_proc is None:
     print("Webcam capture failed to start — recording screen only.")
-mic_proc = start_capture(mic_out, mic_log, tries=3)
-if mic_proc is None:
-    print("Microphone capture failed to start — recording without sound.")
+# Mic before the screen, so the audio track always covers the whole video.
+mic_rec, t_mic = start_mic(mic_file)
 screen_proc = start_capture(screen_out, screen_log)
 if screen_proc is None:
-    for p in (cam_proc, mic_proc):
-        if p:
-            p.terminate()
+    if mic_rec:
+        mic_rec.stop()
+    if cam_proc:
+        cam_proc.terminate()
     sys.exit(f"Screen capture failed to start — see {screen_log}")
-procs = [p for p in (screen_proc, cam_proc, mic_proc) if p]
+procs = [p for p in (screen_proc, cam_proc) if p]
 
 print("Recording... press Ctrl-C to stop.")
 interrupted = False
@@ -316,11 +333,16 @@ try:
     while procs[0].poll() is None:
         loc = CGEventGetLocation(CGEventCreate(None))
         mouse_samples.append((time.monotonic(), loc.x, loc.y))
-        time.sleep(1 / 60)
+        # Pump the runloop instead of sleeping: AVAudioRecorder is a Cocoa
+        # object and needs it serviced to keep writing.
+        NSRunLoop.currentRunLoop().runUntilDate_(
+            NSDate.dateWithTimeIntervalSinceNow_(1 / 60))
 except KeyboardInterrupt:
     # Ctrl-C already reached the ffmpeg children (same process group);
     # a second SIGINT would make ffmpeg hard-exit and truncate the file.
     interrupted = True
+if mic_rec:
+    mic_rec.stop()  # finalizes the WAV header
 for p in procs:
     if not interrupted and p.poll() is None:
         p.send_signal(signal.SIGINT)
@@ -350,12 +372,12 @@ def with_zoom(video):
                  .filter("crop")
                  .filter("scale", w, h))
 
-# Mic audio is aligned exactly like the webcam: avfoundation logs every
-# input's start on the same host clock, so the difference is the startup
-# delay. aresample first_pts=0 pads the leading gap with silence so the
-# sample count matches the timeline — Whisper reads samples, not
-# timestamps, and a gap desyncs every subtitle after it.
-t_mic = first_start_time(mic_log)
+# The mic starts before the screen, so t_mic - t_screen is negative and
+# itsoffset trims the head of the audio to line it up. Both clocks are
+# time.monotonic(): avfoundation logs its 'start:' on the same one.
+# aresample first_pts=0 pads to pts 0 so the sample count matches the
+# timeline — Whisper reads samples, not timestamps, and a gap desyncs
+# every subtitle after it.
 have_mic = os.path.exists(mic_file) and os.path.getsize(mic_file) > 0
 
 def audio_stream():
@@ -427,7 +449,7 @@ else:
 
 # Keep the camera log around when the webcam failed, for diagnosis.
 cleanup = ([screen_file, cam_file, mic_file, screen_log, zoom_file]
-           + ([cam_log] if have_cam else []) + ([mic_log] if have_mic else []))
+           + ([cam_log] if have_cam else []))
 for f in cleanup:
     if os.path.exists(f):
         os.remove(f)
