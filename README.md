@@ -105,6 +105,42 @@ app): **Screen Recording** (capture), **Microphone** (audio), **Camera**
   `0`) are for this machine — list yours with
   `ffmpeg -f avfoundation -list_devices true -i ""`.
 
+## Recording with a teleprompter — `recordprompt.py`
+
+Same output as `record.py` (window + mic + webcam PiP + mouse zoom), plus a
+**click-through teleprompter overlay** on the window that you advance while
+speaking. The overlay is **excluded from the recording**: the screen is
+captured with ScreenCaptureKit as a desktop-independent *window* stream (only
+that app window’s surface), so the floating prompter never appears in the
+video.
+
+```bash
+# talk.txt — blank line between chunks (or use --lines for one line per advance)
+uv run recordprompt.py --script talk.txt
+uv run recordprompt.py --script talk.txt safari
+uv run recordprompt.py --script talk.txt 1280x720 --no-zoom
+uv run recordprompt.py --script talk.txt --lines
+```
+
+**Hotkeys** (work while the demo app has focus):
+
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+Shift+→** or **Ctrl+Shift+N** | next chunk |
+| **Ctrl+Shift+←** or **Ctrl+Shift+P** | previous chunk |
+| **Ctrl+Shift+R** | restart from the first chunk |
+| **Ctrl+Shift+C** | stop recording (same as Ctrl-C) |
+
+Stop with **Ctrl+Shift+C** or **Ctrl-C** — compositing writes `window_recording.mp4`.
+
+**Script format:** paragraphs separated by a blank line are one advance each.
+If the file is a single paragraph with many lines, it advances line by line
+(or force that with `--lines`).
+
+Hotkeys are read from the keyboard HID state (no Accessibility/Input Monitoring
+grant required for the chord itself). You still need Screen Recording, Mic,
+and Camera as with `record.py`.
+
 ## Usage
 
 ### Step 1 — Generate the subtitles
@@ -190,6 +226,7 @@ first  for  you  know  for  war  we  wanted
 | File | |
 |------|--|
 | `record.py` | record a window: mic + webcam PiP + mouse-following zoom |
+| `recordprompt.py` | same as `record.py`, plus a capture-excluded teleprompter overlay |
 | `karaoke.sh` | one-command wrapper — runs both steps |
 | `generate_subs.py` | Step 1 — transcribe → styled `.ass` |
 | `burn_subs.py` | Step 2 — burn `.ass` → mp4 |

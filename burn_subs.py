@@ -89,12 +89,8 @@ def ass_spoken_range(path):
     return min(starts), max(ends)
 
 
-def end_of_sound(ffmpeg, video, noise="-35dB", min_dur=0.5, tail_tolerance=1.0):
-    """Earliest silence_start after which the audio holds less than
-    `tail_tolerance` seconds of total sound through the end of the file.
-    Skips over mid-speech pauses but ignores stray end-of-take blips (the
-    Ctrl-C keystroke, a chair creak). None if the sound runs to the end.
-    """
+def _silence_intervals(ffmpeg, video, noise, min_dur):
+    """Run silencedetect and return (starts, ends, duration) or (None, None, None)."""
     r = subprocess.run(
         [ffmpeg, "-hide_banner", "-i", video,
          "-af", f"silencedetect=noise={noise}:d={min_dur}", "-f", "null", "-"],
@@ -104,9 +100,46 @@ def end_of_sound(ffmpeg, video, noise="-35dB", min_dur=0.5, tail_tolerance=1.0):
     ends = [float(m.group(1))
             for m in re.finditer(r"silence_end: ([-\d.]+)", r.stderr)]
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr)
-    if not starts or not m:
-        return None
+    if not m:
+        return starts, ends, None
     duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    return starts, ends, duration
+
+
+def start_of_sound(ffmpeg, video, noise="-35dB", min_dur=0.5, head_tolerance=1.0):
+    """Latest silence_end before which the audio holds less than
+    `head_tolerance` seconds of total sound from the start of the file.
+    Skips over short lead-in pauses but ignores stray blips (a lip smack, a
+    breath) before real speech begins. None if the sound starts at the very
+    beginning (no leading silence to trim).
+
+    Symmetric to `end_of_sound`: Whisper's first-word timestamp is unreliable
+    at the head of a take (it often pins to 0.0), so snap to the audio instead.
+    """
+    starts, ends, _ = _silence_intervals(ffmpeg, video, noise, min_dur)
+    if not starts or not ends:
+        return None
+    # No silence at t~0 means sound runs from the start; nothing to trim.
+    if starts[0] > head_tolerance:
+        return None
+    best, sound_before, prev_end = None, 0.0, 0.0
+    for s, e in zip(starts, ends):
+        sound_before += max(0.0, s - prev_end)
+        if sound_before > head_tolerance:
+            break
+        best, prev_end = e, e
+    return best
+
+
+def end_of_sound(ffmpeg, video, noise="-35dB", min_dur=0.5, tail_tolerance=1.0):
+    """Earliest silence_start after which the audio holds less than
+    `tail_tolerance` seconds of total sound through the end of the file.
+    Skips over mid-speech pauses but ignores stray end-of-take blips (the
+    Ctrl-C keystroke, a chair creak). None if the sound runs to the end.
+    """
+    starts, ends, duration = _silence_intervals(ffmpeg, video, noise, min_dur)
+    if not starts or duration is None:
+        return None
     if len(ends) < len(starts):
         ends.append(duration)  # final silence runs to EOF
     best, sound_after, next_start = None, 0.0, duration
@@ -134,6 +167,9 @@ def main():
                    help="path to a libass-enabled ffmpeg (auto-detects ffmpeg-full)")
     p.add_argument("--no-trim", action="store_true",
                    help="keep the full video (default: trim to first..last word)")
+    p.add_argument("--exact-start", action="store_true",
+                   help="start exactly at the first word instead of skipping "
+                        "leading silence in the audio")
     p.add_argument("--exact-end", action="store_true",
                    help="cut exactly at the last word instead of extending to "
                         "the next silence in the audio")
@@ -166,6 +202,15 @@ def main():
         else:
             start = max(0.0, rng[0] - args.pad)
             end = rng[1] + args.pad
+            # Whisper's first-word timestamp is unreliable at the head of a
+            # take (it often pins to 0.0 while the speaker is still silent),
+            # so snap the start to where the audio actually begins.
+            if not args.exact_start:
+                sos = start_of_sound(ffmpeg, args.video)
+                if sos is not None and sos > start:
+                    print(f"skipping leading silence: speech starts at "
+                          f"{sos:.2f}s", flush=True)
+                    start = max(0.0, sos - args.pad)
             # Whisper's last-word timestamp often lands well before the audio
             # actually goes quiet (untranscribed speech, trailing sounds), and
             # cutting there chops the sound off. Extend the end to the next
